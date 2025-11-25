@@ -1,209 +1,443 @@
+
 import React, { useState, useEffect, useRef } from 'react';
-import { ChatRoom, Message, RoomType } from '../types';
-import { Send, User, Users, Ghost, Hash, Lock } from 'lucide-react';
+import { ChatRoom, Message, RoomType, Profile } from '../types';
+import { 
+  Send, Users, Hash, Search, Zap, Loader2, 
+  MessageSquare, User, Smile, MoreVertical 
+} from 'lucide-react';
+import { supabase } from '../lib/supabaseClient';
 
-const MOCK_ROOMS: ChatRoom[] = [
-  { id: '1', name: 'General Chatter', type: RoomType.PUBLIC, active_users: 12 },
-  { id: '2', name: 'VITAP Hangout', type: RoomType.PUBLIC, active_users: 24 },
-  { id: '3', name: 'Salaar Spoilers', type: RoomType.ANONYMOUS, active_users: 85 },
-  { id: '4', name: 'Confessions', type: RoomType.ANONYMOUS, active_users: 7 },
-];
-
-const MOCK_MESSAGES: Record<string, Message[]> = {
-  '1': [
-    { id: 'm1', room_id: '1', user_id: 'u1', content: 'Has anyone seen Dune 2 yet?', created_at: '10:00 AM', is_anonymous: false, display_name: 'Rahul_CSE', display_avatar: 'https://picsum.photos/40/40?random=100' },
-    { id: 'm2', room_id: '1', user_id: 'u2', content: 'Yeah, watching it tonight at the campus theater!', created_at: '10:05 AM', is_anonymous: false, display_name: 'Priya_Law', display_avatar: 'https://picsum.photos/40/40?random=101' },
-  ],
-  '3': [
-    { id: 'm3', room_id: '3', user_id: 'u1', content: 'OMG that twist at the end...', created_at: '11:00 PM', is_anonymous: true, display_name: 'Anonymous Fox' },
-    { id: 'm4', room_id: '3', user_id: 'u3', content: 'Shh! I am still watching.', created_at: '11:01 PM', is_anonymous: true, display_name: 'Ghostly Bear' },
-  ]
-};
-
-// Anon name generator
-const ANIMALS = ['Fox', 'Bear', 'Owl', 'Wolf', 'Tiger', 'Eagle'];
-const ADJECTIVES = ['Anonymous', 'Silent', 'Ghostly', 'Hidden', 'Shadow'];
-const getRandomAnonName = () => {
-    const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
-    const animal = ANIMALS[Math.floor(Math.random() * ANIMALS.length)];
-    return `${adj} ${animal}`;
-};
+// --- CONFIG & CONSTANTS ---
+const ANIMALS = ['Panda', 'Tiger', 'Fox', 'Eagle', 'Shark', 'Owl'];
+const COLORS = ['text-red-400', 'text-blue-400', 'text-green-400', 'text-yellow-400', 'text-purple-400'];
 
 const Chat: React.FC = () => {
-  const [activeRoom, setActiveRoom] = useState<ChatRoom>(MOCK_ROOMS[0]);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState('');
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  // --- STATE ---
+  const [currentUser, setCurrentUser] = useState<Profile | null>(null);
   
-  // Fake current user
-  const currentUser = { id: 'me', username: 'MyProfile', avatar: 'https://picsum.photos/40/40?random=999' };
+  // Zone A: Sidebar State
+  const [publicRooms, setPublicRooms] = useState<ChatRoom[]>([]);
+  const [privateRooms, setPrivateRooms] = useState<ChatRoom[]>([]);
+  const [activeRoom, setActiveRoom] = useState<ChatRoom | null>(null);
+  const [isSearchingMatch, setIsSearchingMatch] = useState(false);
+  
+  // Zone B: Chat Area State
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [inputText, setInputText] = useState('');
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Zone C: Context State
+  const [onlineCount, setOnlineCount] = useState<number>(0);
+
+  // --- 1. INITIALIZATION & AUTH ---
   useEffect(() => {
-    // Load messages when room changes
-    setMessages(MOCK_MESSAGES[activeRoom.id] || []);
-  }, [activeRoom]);
+    const init = async () => {
+      // 1. Get Auth Session
+      const { data: { session } } = await supabase.auth.getSession();
+      let userId = session?.user?.id;
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      if (!userId) {
+        // Anon sign in for demo
+        const { data } = await supabase.auth.signInAnonymously();
+        userId = data.user?.id;
+      }
+
+      if (userId) {
+        const { data: profile } = await supabase.from('profiles').select('*').eq('id', userId).single();
+        setCurrentUser(profile);
+      }
+
+      // 2. Fetch Public Rooms
+      const { data: rooms } = await supabase.from('rooms').select('*').eq('type', 'public');
+      if (rooms) {
+        setPublicRooms(rooms as ChatRoom[]);
+        setActiveRoom(rooms[0]); // Default to General
+      }
+
+      // 3. Fetch My Private Matches (Rooms I'm in)
+      const { data: myMatches } = await supabase
+        .from('room_participants')
+        .select('room_id, rooms(*)')
+        .eq('user_id', userId);
+      
+      if (myMatches) {
+        // Fix Supabase join typing: map results, handle potential array, and cast to ChatRoom[]
+        const matches = myMatches.map((m: any) => {
+            const room = m.rooms;
+            return Array.isArray(room) ? room[0] : room;
+        }).filter((r: any) => r && r.type === 'match');
+
+        setPrivateRooms(matches as ChatRoom[]);
+      }
+    };
+    init();
+  }, []);
+
+  // --- 2. RANDOM MATCHMAKING LOGIC ---
+  const handleFindMatch = async () => {
+    if (!currentUser) return;
+    setIsSearchingMatch(true);
+
+    try {
+      // Call the Database Function we created
+      const { data: roomId, error } = await supabase.rpc('find_or_create_match', {
+        my_user_id: currentUser.id
+      });
+
+      if (error) throw error;
+
+      if (roomId) {
+        // Match found immediately!
+        joinMatchRoom(roomId);
+      } else {
+        // Added to queue, wait for a match via Realtime
+        subscribeToQueueMatches();
+      }
+    } catch (e) {
+      console.error("Match error", e);
+      setIsSearchingMatch(false);
+    }
   };
 
-  useEffect(scrollToBottom, [messages]);
+  const subscribeToQueueMatches = () => {
+    // Listen to 'room_participants' to see if I get added to a room
+    const channel = supabase.channel('queue_listener')
+      .on(
+        'postgres_changes', 
+        { event: 'INSERT', schema: 'public', table: 'room_participants', filter: `user_id=eq.${currentUser?.id}` }, 
+        async (payload) => {
+          // I was added to a room!
+          const newRoomId = payload.new.room_id;
+          joinMatchRoom(newRoomId);
+          supabase.removeChannel(channel);
+        }
+      )
+      .subscribe();
+  };
 
-  const handleSend = () => {
-    if (!input.trim()) return;
+  const joinMatchRoom = async (roomId: string) => {
+    setIsSearchingMatch(false);
+    // Fetch room details
+    const { data } = await supabase.from('rooms').select('*').eq('id', roomId).single();
+    if (data) {
+        setPrivateRooms(prev => [data, ...prev]);
+        setActiveRoom(data);
+    }
+  };
 
-    const isAnon = activeRoom.type === RoomType.ANONYMOUS;
-    
-    const newMessage: Message = {
-      id: Date.now().toString(),
-      room_id: activeRoom.id,
-      user_id: currentUser.id,
-      content: input,
-      created_at: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      is_anonymous: isAnon,
-      display_name: isAnon ? getRandomAnonName() : currentUser.username,
-      display_avatar: isAnon ? undefined : currentUser.avatar
+  // --- 3. MESSAGING LOGIC (REALTIME) ---
+  useEffect(() => {
+    if (!activeRoom) return;
+
+    // Load initial messages
+    const fetchMsgs = async () => {
+        const { data } = await supabase
+            .from('messages')
+            .select('*, profiles(username, avatar_url)')
+            .eq('room_id', activeRoom.id)
+            .order('created_at', { ascending: true });
+        setMessages(data || []);
     };
+    fetchMsgs();
 
-    setMessages(prev => [...prev, newMessage]);
-    setInput('');
+    // Subscribe to new messages
+    const channel = supabase
+        .channel(`room:${activeRoom.id}`)
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `room_id=eq.${activeRoom.id}` }, async (payload) => {
+            const newMsg = payload.new as Message;
+            // Fetch profile for the new message to display avatar immediately
+            const { data } = await supabase.from('profiles').select('username, avatar_url').eq('id', newMsg.user_id).single();
+            newMsg.profiles = data as Profile;
+            setMessages(prev => [...prev, newMsg]);
+        })
+        .subscribe();
+        
+    // Mock Online Count
+    setOnlineCount(Math.floor(Math.random() * 50) + 5);
+
+    return () => { supabase.removeChannel(channel); };
+  }, [activeRoom]);
+
+  // Scroll to bottom
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  const sendMessage = async () => {
+    if (!inputText.trim() || !currentUser || !activeRoom) return;
+    
+    // Logic: If Match Room -> Anonymous by default
+    const isAnon = activeRoom.type === 'match';
+    const fakeName = isAnon ? `Anonymous ${ANIMALS[Math.floor(Math.random() * ANIMALS.length)]}` : undefined;
+
+    const { error } = await supabase.from('messages').insert({
+        room_id: activeRoom.id,
+        user_id: currentUser.id,
+        content: inputText,
+        is_anonymous: isAnon,
+        fake_username: fakeName
+    });
+
+    if (!error) setInputText('');
+  };
+
+  // --- 4. RENDER HELPERS ---
+  const isMessageGrouped = (index: number) => {
+      if (index === 0) return false;
+      const current = messages[index];
+      const prev = messages[index - 1];
+      // Group if same user and within 5 minutes
+      const timeDiff = new Date(current.created_at).getTime() - new Date(prev.created_at).getTime();
+      return current.user_id === prev.user_id && timeDiff < 5 * 60 * 1000;
   };
 
   return (
-    <div className="flex h-[calc(100vh-64px)] overflow-hidden bg-slate-900">
+    <div className="flex h-[calc(100vh-64px)] bg-slate-900 text-slate-100 overflow-hidden font-sans">
       
-      {/* Sidebar - Room List */}
-      <div className="w-80 bg-slate-800 border-r border-slate-700 flex flex-col hidden md:flex">
-        <div className="p-4 border-b border-slate-700">
-          <h2 className="text-lg font-bold text-white flex items-center gap-2">
-            <Hash size={20} className="text-indigo-400" /> Channels
-          </h2>
-        </div>
-        <div className="flex-1 overflow-y-auto p-4 space-y-2">
-          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Public Rooms</div>
-          {MOCK_ROOMS.filter(r => r.type === RoomType.PUBLIC).map(room => (
-            <button
-              key={room.id}
-              onClick={() => setActiveRoom(room)}
-              className={`w-full text-left px-3 py-2 rounded-lg transition-colors flex justify-between items-center ${
-                activeRoom.id === room.id ? 'bg-indigo-600 text-white' : 'text-slate-300 hover:bg-slate-700'
-              }`}
-            >
-              <span className="flex items-center gap-2"># {room.name}</span>
-            </button>
-          ))}
-
-          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mt-6 mb-2">Anonymous Zones</div>
-          {MOCK_ROOMS.filter(r => r.type === RoomType.ANONYMOUS).map(room => (
-            <button
-              key={room.id}
-              onClick={() => setActiveRoom(room)}
-              className={`w-full text-left px-3 py-2 rounded-lg transition-colors flex justify-between items-center ${
-                activeRoom.id === room.id ? 'bg-rose-900/50 text-rose-200 border border-rose-800' : 'text-slate-300 hover:bg-slate-700'
-              }`}
-            >
-              <span className="flex items-center gap-2"><Ghost size={14} /> {room.name}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col min-w-0">
+      {/* --- ZONE A: NAVIGATION SIDEBAR --- */}
+      <div className="w-72 flex-shrink-0 bg-slate-900 border-r border-slate-800 flex flex-col">
         
-        {/* Chat Header */}
-        <div className="h-16 border-b border-slate-700 bg-slate-800/50 flex items-center px-6 justify-between">
-          <div className="flex items-center gap-3">
-            {activeRoom.type === RoomType.ANONYMOUS ? (
-              <div className="bg-rose-600 p-2 rounded-lg">
-                <Ghost size={20} className="text-white" />
-              </div>
-            ) : (
-               <div className="bg-indigo-600 p-2 rounded-lg">
-                <Hash size={20} className="text-white" />
-              </div>
-            )}
-            <div>
-              <h3 className="text-white font-bold">{activeRoom.name}</h3>
-              <p className="text-slate-400 text-xs flex items-center gap-1">
-                 {activeRoom.type === RoomType.ANONYMOUS ? 'Incognito Mode Active' : 'Public Channel'}
-              </p>
-            </div>
-          </div>
-          <div className="text-slate-400 text-sm flex items-center gap-2">
-            <Users size={16} /> {activeRoom.active_users} online
-          </div>
-        </div>
-
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-hide">
-          {messages.length === 0 && (
-             <div className="text-center text-slate-500 mt-10">No messages yet. Be the first!</div>
-          )}
-          {messages.map((msg) => {
-            const isMe = msg.user_id === currentUser.id;
-            return (
-              <div key={msg.id} className={`flex gap-4 ${isMe ? 'flex-row-reverse' : ''}`}>
-                {/* Avatar */}
-                <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
-                  msg.is_anonymous ? 'bg-rose-900' : 'bg-slate-700'
-                }`}>
-                  {msg.is_anonymous ? (
-                    <Ghost size={20} className="text-rose-400" />
-                  ) : (
-                    <img src={msg.display_avatar} alt="av" className="w-full h-full rounded-full object-cover" />
-                  )}
-                </div>
-
-                <div className={`flex flex-col max-w-[70%] ${isMe ? 'items-end' : 'items-start'}`}>
-                  <div className="flex items-baseline gap-2 mb-1">
-                    <span className={`text-sm font-bold ${
-                      msg.is_anonymous ? 'text-rose-400' : 'text-indigo-400'
-                    }`}>
-                      {msg.display_name}
-                    </span>
-                    <span className="text-xs text-slate-500">{msg.created_at}</span>
-                  </div>
-                  <div className={`px-4 py-2 rounded-2xl ${
-                    isMe 
-                      ? 'bg-indigo-600 text-white rounded-tr-none' 
-                      : 'bg-slate-700 text-slate-200 rounded-tl-none'
-                  }`}>
-                    {msg.content}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-          <div ref={messagesEndRef} />
-        </div>
-
-        {/* Input */}
-        <div className="p-4 bg-slate-800 border-t border-slate-700">
-           <div className="relative">
-             <input
-               type="text"
-               value={input}
-               onChange={(e) => setInput(e.target.value)}
-               onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-               placeholder={`Message #${activeRoom.name} ${activeRoom.type === RoomType.ANONYMOUS ? '(anonymously)' : ''}...`}
-               className="w-full bg-slate-900 text-white placeholder-slate-500 rounded-xl pl-4 pr-12 py-3 focus:outline-none focus:ring-2 focus:ring-indigo-500 border border-slate-700"
-             />
-             <button 
-               onClick={handleSend}
-               className="absolute right-2 top-2 p-1.5 bg-indigo-600 hover:bg-indigo-700 rounded-lg text-white transition-colors"
-             >
-               <Send size={20} />
-             </button>
+        {/* Global/Broadcast Header */}
+        <div className="p-4 border-b border-slate-800">
+           <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Broadcast Channels</h2>
+           <div className="space-y-1">
+             {publicRooms.map(room => (
+               <button 
+                 key={room.id}
+                 onClick={() => setActiveRoom(room)}
+                 className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg transition-all ${activeRoom?.id === room.id ? 'bg-indigo-600/20 text-indigo-400' : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'}`}
+               >
+                 <Hash size={18} />
+                 <span className="font-medium truncate">#{room.name}</span>
+               </button>
+             ))}
            </div>
-           {activeRoom.type === RoomType.ANONYMOUS && (
-             <p className="text-xs text-rose-400 mt-2 flex items-center gap-1">
-               <Lock size={12} /> Your identity is hidden in this room.
-             </p>
-           )}
         </div>
 
+        {/* Active Chats / Matches */}
+        <div className="flex-1 overflow-y-auto p-4">
+           <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Private Matches</h2>
+           <div className="space-y-1">
+             {privateRooms.map((room, idx) => (
+               <button 
+                 key={room.id}
+                 onClick={() => setActiveRoom(room)}
+                 className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-all ${activeRoom?.id === room.id ? 'bg-slate-800 text-white' : 'text-slate-400 hover:bg-slate-800'}`}
+               >
+                 <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center">
+                    <Zap size={14} className="text-yellow-400" />
+                 </div>
+                 <div className="flex-1 text-left">
+                    <div className="text-sm font-medium text-slate-200">Anon Match #{idx + 1}</div>
+                    <div className="text-xs text-slate-500 truncate">Click to chat</div>
+                 </div>
+               </button>
+             ))}
+             {privateRooms.length === 0 && (
+                <div className="text-center py-6 text-slate-600 text-sm italic">
+                    No active matches yet.
+                </div>
+             )}
+           </div>
+        </div>
+
+        {/* Random Match Button */}
+        <div className="p-4 border-t border-slate-800 bg-slate-900/50">
+           <button 
+             onClick={handleFindMatch}
+             disabled={isSearchingMatch}
+             className={`w-full py-3 rounded-xl flex items-center justify-center gap-2 font-bold shadow-lg shadow-indigo-500/10 transition-all ${
+               isSearchingMatch 
+                ? 'bg-slate-800 text-slate-400 cursor-not-allowed'
+                : 'bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 text-white'
+             }`}
+           >
+             {isSearchingMatch ? (
+                <>
+                   <Loader2 size={18} className="animate-spin" /> Searching...
+                </>
+             ) : (
+                <>
+                   <Zap size={18} fill="currentColor" /> Random 1-on-1
+                </>
+             )}
+           </button>
+        </div>
       </div>
+
+      {/* --- ZONE B: CHAT ARENA --- */}
+      <div className="flex-1 flex flex-col min-w-0 bg-slate-950/30 relative">
+        
+        {/* Header */}
+        <div className="h-16 px-6 border-b border-slate-800 flex items-center justify-between bg-slate-900/50 backdrop-blur-md">
+            <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-slate-800 flex items-center justify-center">
+                    {activeRoom?.type === 'public' ? <Hash size={20} className="text-slate-400" /> : <Zap size={20} className="text-yellow-400" />}
+                </div>
+                <div>
+                    <h2 className="text-lg font-bold text-white leading-tight">
+                        {activeRoom?.type === 'public' ? activeRoom.name : 'Anonymous Match'}
+                    </h2>
+                    <p className="text-xs text-green-400 flex items-center gap-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
+                        {activeRoom?.type === 'public' ? `${onlineCount} students online` : 'Incognito Mode Active'}
+                    </p>
+                </div>
+            </div>
+            
+            {/* Action Buttons */}
+            <div className="flex items-center gap-2 text-slate-400">
+               <button className="p-2 hover:bg-slate-800 rounded-lg transition-colors"><Search size={20} /></button>
+               <button className="p-2 hover:bg-slate-800 rounded-lg transition-colors md:hidden"><MoreVertical size={20} /></button>
+            </div>
+        </div>
+
+        {/* Message Stream */}
+        <div className="flex-1 overflow-y-auto p-6 space-y-1">
+            {messages.length === 0 && (
+                <div className="h-full flex flex-col items-center justify-center text-slate-500 opacity-60">
+                    <MessageSquare size={48} className="mb-4 text-slate-700" />
+                    <p>No messages yet. Be the first!</p>
+                </div>
+            )}
+            
+            {messages.map((msg, idx) => {
+                const isMe = msg.user_id === currentUser?.id;
+                const grouped = isMessageGrouped(idx);
+                const showAvatar = !isMe && !grouped;
+                const displayName = msg.is_anonymous 
+                    ? (msg.fake_username || "Anonymous")
+                    : (msg.profiles?.username || "Student");
+
+                return (
+                    <div key={msg.id} className={`flex gap-3 group ${isMe ? 'flex-row-reverse' : ''} ${grouped ? 'mt-1' : 'mt-6'}`}>
+                        {/* Avatar */}
+                        {!isMe && (
+                             <div className="w-10 flex-shrink-0 flex flex-col items-center">
+                                {showAvatar && (
+                                    <div className={`w-10 h-10 rounded-full flex items-center justify-center overflow-hidden ${msg.is_anonymous ? 'bg-gradient-to-br from-slate-700 to-slate-800' : 'bg-indigo-900'}`}>
+                                        {msg.profiles?.avatar_url && !msg.is_anonymous ? (
+                                            <img src={msg.profiles.avatar_url} alt="Av" className="w-full h-full object-cover" />
+                                        ) : (
+                                            <User size={18} className="text-slate-400" />
+                                        )}
+                                    </div>
+                                )}
+                             </div>
+                        )}
+                        
+                        {/* Bubble Area */}
+                        <div className={`max-w-[70%] flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
+                            {/* Name & Time Header (Only if not grouped) */}
+                            {!grouped && (
+                                <div className="flex items-center gap-2 mb-1 px-1">
+                                    <span className={`text-sm font-bold ${msg.is_anonymous ? 'text-slate-300' : 'text-indigo-400'}`}>
+                                        {displayName}
+                                    </span>
+                                    <span className="text-[10px] text-slate-600">
+                                        {new Date(msg.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                    </span>
+                                </div>
+                            )}
+                            
+                            {/* The Bubble */}
+                            <div className={`px-4 py-2.5 text-sm leading-relaxed shadow-sm transition-all relative group-hover:shadow-md ${
+                                isMe 
+                                 ? 'bg-indigo-600 text-white rounded-2xl rounded-tr-sm' 
+                                 : 'bg-slate-800 text-slate-200 rounded-2xl rounded-tl-sm'
+                            }`}>
+                                {msg.content}
+                            </div>
+                        </div>
+                    </div>
+                );
+            })}
+            <div ref={messagesEndRef} />
+        </div>
+
+        {/* Input Area */}
+        <div className="p-4 bg-slate-900 border-t border-slate-800">
+            <div className="max-w-4xl mx-auto relative flex items-end gap-2 bg-slate-800/50 p-2 rounded-xl border border-slate-700 focus-within:border-indigo-500/50 focus-within:bg-slate-800 transition-all">
+                <button className="p-2 text-slate-400 hover:text-indigo-400 transition-colors">
+                    <Smile size={24} />
+                </button>
+                <textarea 
+                    value={inputText}
+                    onChange={(e) => setInputText(e.target.value)}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            sendMessage();
+                        }
+                    }}
+                    placeholder={`Message ${activeRoom?.name || 'Match'}...`}
+                    className="flex-1 bg-transparent border-none focus:ring-0 text-slate-200 placeholder-slate-500 resize-none max-h-32 min-h-[44px] py-2.5 scrollbar-hide"
+                    rows={1}
+                />
+                <button 
+                    onClick={sendMessage}
+                    disabled={!inputText.trim()}
+                    className={`p-2 rounded-lg transition-all ${
+                        inputText.trim() 
+                        ? 'bg-indigo-600 text-white hover:bg-indigo-500 shadow-lg shadow-indigo-500/20' 
+                        : 'bg-slate-700 text-slate-500 cursor-not-allowed'
+                    }`}
+                >
+                    <Send size={20} />
+                </button>
+            </div>
+            {activeRoom?.type === 'match' && (
+                <div className="text-center mt-2">
+                     <span className="text-xs text-slate-500">You are chatting anonymously. Messages are not linked to your profile.</span>
+                </div>
+            )}
+        </div>
+      </div>
+
+      {/* --- ZONE C: CONTEXT PANEL (Desktop Only) --- */}
+      <div className="w-64 bg-slate-900 border-l border-slate-800 hidden lg:flex flex-col p-6">
+        {activeRoom?.type === 'public' ? (
+            <>
+                 <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4">Room Info</h3>
+                 <p className="text-sm text-slate-400 mb-6">This is a public broadcast channel for all VITAP students.</p>
+                 
+                 <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4">Active Now</h3>
+                 <div className="space-y-3">
+                    {[1,2,3,4].map(i => (
+                        <div key={i} className="flex items-center gap-3 opacity-60">
+                            <div className="w-8 h-8 rounded-full bg-slate-700"></div>
+                            <div className="h-2 w-24 bg-slate-800 rounded"></div>
+                        </div>
+                    ))}
+                 </div>
+            </>
+        ) : (
+            <>
+                <div className="flex flex-col items-center mt-6">
+                    <div className="w-20 h-20 bg-slate-800 rounded-full flex items-center justify-center mb-4 relative">
+                        <Zap size={32} className="text-yellow-400" />
+                        <span className="absolute bottom-0 right-0 w-4 h-4 bg-green-500 border-2 border-slate-900 rounded-full"></span>
+                    </div>
+                    <h3 className="font-bold text-white">Anonymous Match</h3>
+                    <p className="text-xs text-slate-500 mt-1">Found via Queue</p>
+                </div>
+                
+                <div className="mt-8 bg-indigo-900/20 rounded-xl p-4 border border-indigo-900/50">
+                    <h4 className="text-xs font-bold text-indigo-400 mb-2">Compatibility</h4>
+                    <p className="text-sm text-slate-300 leading-relaxed">
+                        You both watched <span className="text-white font-medium">Inception</span> and <span className="text-white font-medium">The Boys</span>.
+                    </p>
+                </div>
+
+                <div className="mt-auto">
+                    <button className="w-full py-2 bg-slate-800 hover:bg-rose-900/30 hover:text-rose-400 text-slate-400 rounded-lg text-sm transition-colors border border-slate-700">
+                        Report User
+                    </button>
+                </div>
+            </>
+        )}
+      </div>
+
     </div>
   );
 };
