@@ -142,7 +142,12 @@ const Chat: React.FC = () => {
             // Fetch profile for the new message
             const { data } = await supabase.from('profiles').select('username, avatar_url').eq('id', newMsg.user_id).single();
             newMsg.profiles = data as Profile;
-            setMessages(prev => [...prev, newMsg]);
+            
+            // EDGE CASE FIX: Prevent duplicate messages from realtime + initial fetch race condition
+            setMessages(prev => {
+                if (prev.find(m => m.id === newMsg.id)) return prev;
+                return [...prev, newMsg];
+            });
         })
         .subscribe();
         

@@ -4,7 +4,7 @@ import { getAIRecommendations } from '../services/geminiService';
 import { Movie } from '../types';
 import MovieCard from '../components/MovieCard';
 import MovieDetailsModal from '../components/MovieDetailsModal';
-import { Sparkles, Loader2, Filter, Search, X } from 'lucide-react';
+import { Sparkles, Loader2, Filter, Search, X, ChevronDown } from 'lucide-react';
 import { supabase } from '../lib/supabaseClient';
 import { useAuth } from '../lib/AuthContext';
 
@@ -21,9 +21,18 @@ const GENRES = [
 
 const Dashboard: React.FC = () => {
   const { user } = useAuth();
+  
+  // Data State
   const [movies, setMovies] = useState<Movie[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  
+  // User Data State
   const [watchlist, setWatchlist] = useState<number[]>([]);
+  
+  // Filter State
   const [selectedGenre, setSelectedGenre] = useState(0);
   const [selectedMovie, setSelectedMovie] = useState<Movie | null>(null);
   
@@ -35,26 +44,53 @@ const Dashboard: React.FC = () => {
   const [aiRecommendation, setAiRecommendation] = useState<string>("");
   const [loadingAi, setLoadingAi] = useState(false);
 
-  // Initial Load & Genre Change
+  // --- Data Fetching Logic ---
   useEffect(() => {
-    if (isSearching) return; // Don't override search results
-
     const loadMovies = async () => {
-      setLoading(true);
-      let data;
-      if (selectedGenre === 0) {
-          data = await fetchTrendingMovies();
-      } else {
-          data = await discoverMoviesByGenre(selectedGenre);
+      // If it's page 1, show main loader. If page > 1, show "loading more" spinner at bottom
+      if (page === 1) setLoading(true);
+      else setLoadingMore(true);
+
+      let data: Movie[] = [];
+      
+      try {
+          if (isSearching) {
+              data = await searchMovies(searchQuery, page);
+          } else if (selectedGenre === 0) {
+              data = await fetchTrendingMovies(page);
+          } else {
+              data = await discoverMoviesByGenre(selectedGenre, page);
+          }
+
+          if (page === 1) {
+              setMovies(data);
+          } else {
+              setMovies(prev => [...prev, ...data]);
+          }
+          
+          // If we got fewer than 20 results, we reached the end
+          setHasMore(data.length === 20);
+
+      } catch (e) {
+          console.error("Fetch error", e);
+      } finally {
+          setLoading(false);
+          setLoadingMore(false);
       }
-      setMovies(data);
-      setLoading(false);
     };
     
-    loadMovies();
-  }, [selectedGenre, isSearching]);
+    // Debounce search slightly to avoid rapid firing on page change
+    const timeoutId = setTimeout(() => {
+        loadMovies();
+    }, 100);
 
-  // Fetch watchlist when user logs in
+    return () => clearTimeout(timeoutId);
+  }, [selectedGenre, isSearching, page, searchQuery]); 
+  // Note: searchQuery is in dependency array but we control it via isSearching flag for API calls mostly,
+  // except when typing in the search box we might want to debounce. 
+  // Current implementation: handleSearch sets isSearching=true which triggers effect.
+
+  // Fetch watchlist
   useEffect(() => {
       const loadUserLibrary = async () => {
           if (user) {
@@ -72,21 +108,37 @@ const Dashboard: React.FC = () => {
       loadUserLibrary();
   }, [user]);
 
-  const handleSearch = async (e: React.FormEvent) => {
+  // --- Handlers ---
+
+  const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
     if (!searchQuery.trim()) return;
-
-    setLoading(true);
+    
+    // Reset Everything for Search
+    setPage(1);
+    setSelectedGenre(0);
     setIsSearching(true);
-    const results = await searchMovies(searchQuery);
-    setMovies(results);
-    setLoading(false);
+    setMovies([]); // Clear current to show loading
+  };
+
+  const handleGenreSelect = (id: number) => {
+      // Clear search, reset page, set genre
+      setSearchQuery('');
+      setIsSearching(false);
+      setPage(1);
+      setSelectedGenre(id);
+      setMovies([]);
   };
 
   const clearSearch = () => {
       setSearchQuery('');
       setIsSearching(false);
       setSelectedGenre(0);
+      setPage(1);
+  };
+
+  const loadMore = () => {
+      setPage(prev => prev + 1);
   };
 
   const handleAddToWatchlist = async (id: number) => {
@@ -142,7 +194,7 @@ const Dashboard: React.FC = () => {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-8">
         
         {/* AI Section (Only show on Dashboard home) */}
-        {!isSearching && (
+        {!isSearching && selectedGenre === 0 && page === 1 && (
             <div className="bg-gradient-to-r from-slate-800 to-slate-900 rounded-2xl p-6 border border-slate-700 mb-12 shadow-xl">
                 <div className="flex items-start gap-4">
                     <div className="bg-indigo-500/20 p-3 rounded-xl">
@@ -191,29 +243,28 @@ const Dashboard: React.FC = () => {
                 )}
             </h2>
             
-            {!isSearching && (
-                <div className="flex items-center gap-2 overflow-x-auto pb-2 md:pb-0 scrollbar-hide">
-                    <Filter size={16} className="text-slate-500 mr-1" />
-                    {GENRES.map(genre => (
-                        <button
-                            key={genre.id}
-                            onClick={() => setSelectedGenre(genre.id)}
-                            className={`px-3 py-1.5 rounded-full text-sm font-medium whitespace-nowrap transition-colors ${
-                                selectedGenre === genre.id 
-                                ? 'bg-indigo-600 text-white' 
-                                : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white'
-                            }`}
-                        >
-                            {genre.name}
-                        </button>
-                    ))}
-                </div>
-            )}
+            {/* Genre Buttons */}
+            <div className="flex items-center gap-2 overflow-x-auto pb-2 md:pb-0 scrollbar-hide">
+                <Filter size={16} className="text-slate-500 mr-1" />
+                {GENRES.map(genre => (
+                    <button
+                        key={genre.id}
+                        onClick={() => handleGenreSelect(genre.id)}
+                        className={`px-3 py-1.5 rounded-full text-sm font-medium whitespace-nowrap transition-colors ${
+                            selectedGenre === genre.id && !isSearching
+                            ? 'bg-indigo-600 text-white' 
+                            : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white'
+                        }`}
+                    >
+                        {genre.name}
+                    </button>
+                ))}
+            </div>
         </div>
         
         {loading ? (
            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-6">
-             {[...Array(5)].map((_, i) => (
+             {[...Array(10)].map((_, i) => (
                <div key={i} className="bg-slate-800 h-96 rounded-xl animate-pulse"></div>
              ))}
            </div>
@@ -225,17 +276,40 @@ const Dashboard: React.FC = () => {
                     <p className="text-lg">No movies found. Try searching for "Inception" or "Salaar".</p>
                 </div>
             )}
+            
             <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-6">
-                {movies.map(movie => (
-                <MovieCard 
-                    key={movie.id} 
-                    movie={movie} 
-                    onAdd={handleAddToWatchlist}
-                    isAdded={watchlist.includes(movie.id)}
-                    onClick={() => setSelectedMovie(movie)}
-                />
+                {movies.map((movie, index) => (
+                    // Using index as part of key because TMDB sometimes duplicates items across pages
+                    <MovieCard 
+                        key={`${movie.id}-${index}`} 
+                        movie={movie} 
+                        onAdd={handleAddToWatchlist}
+                        isAdded={watchlist.includes(movie.id)}
+                        onClick={() => setSelectedMovie(movie)}
+                    />
                 ))}
             </div>
+
+            {/* Load More Button */}
+            {hasMore && movies.length > 0 && (
+                <div className="mt-12 flex justify-center">
+                    <button 
+                        onClick={loadMore}
+                        disabled={loadingMore}
+                        className="flex items-center gap-2 px-8 py-3 bg-slate-800 hover:bg-slate-700 rounded-full font-semibold text-white transition-all shadow-lg"
+                    >
+                        {loadingMore ? (
+                            <>
+                                <Loader2 className="animate-spin" size={20} /> Loading...
+                            </>
+                        ) : (
+                            <>
+                                <ChevronDown size={20} /> Load More Movies
+                            </>
+                        )}
+                    </button>
+                </div>
+            )}
           </>
         )}
       </div>

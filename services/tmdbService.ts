@@ -5,12 +5,10 @@ const BASE_URL = 'https://api.themoviedb.org/3';
 const IMAGE_BASE_URL = 'https://image.tmdb.org/t/p/w500';
 const BACKDROP_BASE_URL = 'https://image.tmdb.org/t/p/w1280';
 
-export const fetchTrendingMovies = async (): Promise<Movie[]> => {
+export const fetchTrendingMovies = async (page: number = 1): Promise<Movie[]> => {
   try {
-    const response = await fetch(`${BASE_URL}/trending/movie/week?api_key=${API_KEY}`);
+    const response = await fetch(`${BASE_URL}/trending/movie/week?api_key=${API_KEY}&page=${page}`);
     const data = await response.json();
-    
-    // Return all results (usually 20), removed slice limit
     return data.results.map((m: any) => transformMovie(m));
   } catch (error) {
     console.error("Error fetching trending movies:", error);
@@ -18,9 +16,9 @@ export const fetchTrendingMovies = async (): Promise<Movie[]> => {
   }
 };
 
-export const discoverMoviesByGenre = async (genreId: number): Promise<Movie[]> => {
+export const discoverMoviesByGenre = async (genreId: number, page: number = 1): Promise<Movie[]> => {
   try {
-    const response = await fetch(`${BASE_URL}/discover/movie?api_key=${API_KEY}&with_genres=${genreId}&sort_by=popularity.desc`);
+    const response = await fetch(`${BASE_URL}/discover/movie?api_key=${API_KEY}&with_genres=${genreId}&sort_by=popularity.desc&page=${page}`);
     const data = await response.json();
     return data.results.map((m: any) => transformMovie(m));
   } catch (error) {
@@ -29,12 +27,11 @@ export const discoverMoviesByGenre = async (genreId: number): Promise<Movie[]> =
   }
 };
 
-export const searchMovies = async (query: string): Promise<Movie[]> => {
+export const searchMovies = async (query: string, page: number = 1): Promise<Movie[]> => {
   if (!query) return [];
   try {
-    const response = await fetch(`${BASE_URL}/search/movie?api_key=${API_KEY}&query=${encodeURIComponent(query)}`);
+    const response = await fetch(`${BASE_URL}/search/movie?api_key=${API_KEY}&query=${encodeURIComponent(query)}&page=${page}`);
     const data = await response.json();
-    
     return data.results.map((m: any) => transformMovie(m));
   } catch (error) {
     console.error("Error searching movies:", error);
